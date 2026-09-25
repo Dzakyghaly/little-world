@@ -3287,11 +3287,14 @@ function PetStatus({ icon, label, value, className }) {
 
 function GlobalAudio() {
   const MUSIC_KEY = "little-world-music-settings";
+
   const [audio] = useState(() => {
     const element = new Audio("/music/background.mp3");
     element.loop = true;
     element.preload = "auto";
     element.volume = 0.22;
+    element.setAttribute("playsinline", "");
+    element.setAttribute("webkit-playsinline", "");
     return element;
   });
 
@@ -3305,33 +3308,77 @@ function GlobalAudio() {
     try {
       const saved = JSON.parse(localStorage.getItem(MUSIC_KEY));
       if (saved) {
-        const nextVolume = Number(saved.volume ?? 22);
+        const nextVolume = Math.min(
+          55,
+          Math.max(0, Number(saved.volume ?? 22)),
+        );
+        const nextMuted = Boolean(saved.muted);
         setVolume(nextVolume);
-        setMuted(Boolean(saved.muted));
+        setMuted(nextMuted);
         audio.volume = nextVolume / 100;
-        audio.muted = Boolean(saved.muted);
+        audio.muted = nextMuted;
       }
     } catch {
-      // Keep defaults.
+      // Keep defaults if saved settings cannot be read.
     }
 
-    const startAfterInteraction = () => {
-      audio
-        .play()
-        .then(() => {
-          setPlaying(true);
-          setNeedsMusic(false);
-        })
-        .catch(() => setNeedsMusic(true));
+    const syncPlaying = () => {
+      setPlaying(!audio.paused && !audio.ended);
     };
 
-    window.addEventListener("pointerdown", startAfterInteraction, {
-      once: true,
-      passive: true,
-    });
+    const handleError = () => {
+      setPlaying(false);
+      setNeedsMusic(true);
+    };
+
+    audio.addEventListener("play", syncPlaying);
+    audio.addEventListener("pause", syncPlaying);
+    audio.addEventListener("ended", syncPlaying);
+    audio.addEventListener("error", handleError);
+
+    // Mobile Safari / installed PWA requires audio.play() to happen directly
+    // from a real user gesture. Try several mobile-friendly gesture events and
+    // remove them only after playback really starts.
+    const unlockAudio = async () => {
+      try {
+        const AudioContextClass =
+          window.AudioContext || window.webkitAudioContext;
+        if (AudioContextClass) {
+          const context =
+            window.__littleWorldAudioContext || new AudioContextClass();
+          window.__littleWorldAudioContext = context;
+          if (context.state === "suspended") {
+            await context.resume().catch(() => {});
+          }
+        }
+
+        await audio.play();
+        setPlaying(true);
+        setNeedsMusic(false);
+        removeUnlockListeners();
+      } catch {
+        // The browser may still require the user to press the visible Play
+        // button. Keep the listeners so the next gesture can try again.
+        setNeedsMusic(true);
+      }
+    };
+
+    const removeUnlockListeners = () => {
+      window.removeEventListener("pointerup", unlockAudio);
+      window.removeEventListener("touchend", unlockAudio);
+      window.removeEventListener("click", unlockAudio);
+    };
+
+    window.addEventListener("pointerup", unlockAudio, { passive: true });
+    window.addEventListener("touchend", unlockAudio, { passive: true });
+    window.addEventListener("click", unlockAudio);
 
     return () => {
-      window.removeEventListener("pointerdown", startAfterInteraction);
+      removeUnlockListeners();
+      audio.removeEventListener("play", syncPlaying);
+      audio.removeEventListener("pause", syncPlaying);
+      audio.removeEventListener("ended", syncPlaying);
+      audio.removeEventListener("error", handleError);
       audio.pause();
     };
   }, [audio]);
@@ -3340,7 +3387,12 @@ function GlobalAudio() {
     audio.volume = volume / 100;
     audio.muted = muted;
     window.__littleWorldSoundMuted = muted;
-    localStorage.setItem(MUSIC_KEY, JSON.stringify({ volume, muted }));
+
+    try {
+      localStorage.setItem(MUSIC_KEY, JSON.stringify({ volume, muted }));
+    } catch {
+      // Ignore storage errors (for example private browsing restrictions).
+    }
   }, [audio, volume, muted]);
 
   useEffect(() => {
@@ -3354,16 +3406,29 @@ function GlobalAudio() {
     return () => document.removeEventListener("click", cuteClick);
   }, [muted]);
 
-  function togglePlay() {
+  async function togglePlay() {
     if (audio.paused) {
-      audio
-        .play()
-        .then(() => {
-          setPlaying(true);
-          setNeedsMusic(false);
-          playTinySound("sparkle", muted);
-        })
-        .catch(() => setNeedsMusic(true));
+      try {
+        const AudioContextClass =
+          window.AudioContext || window.webkitAudioContext;
+        if (AudioContextClass) {
+          const context =
+            window.__littleWorldAudioContext || new AudioContextClass();
+          window.__littleWorldAudioContext = context;
+          if (context.state === "suspended") {
+            await context.resume().catch(() => {});
+          }
+        }
+
+        await audio.play();
+        setPlaying(true);
+        setNeedsMusic(false);
+        playTinySound("sparkle", muted);
+      } catch (error) {
+        console.error("Background music could not start:", error);
+        setPlaying(false);
+        setNeedsMusic(true);
+      }
     } else {
       audio.pause();
       setPlaying(false);
@@ -3399,7 +3464,7 @@ function GlobalAudio() {
               <strong>Little World Radio</strong>
               <span>
                 {needsMusic
-                  ? "Add public/music/background.mp3"
+                  ? "tap ▶ to start music"
                   : playing
                     ? "playing softly ♫"
                     : "paused"}
@@ -3426,7 +3491,9 @@ function GlobalAudio() {
           </div>
 
           <p>
-            Background music stays on while you explore the whole Little World.
+            {needsMusic
+              ? "Your phone may block autoplay. Tap the play button once to unlock the music."
+              : "Background music stays on while you explore the whole Little World."}
           </p>
         </div>
       )}
